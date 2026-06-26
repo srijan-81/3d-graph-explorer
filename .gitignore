@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+*.egg-link
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# uv
+.uv/
+
+# Distribution / packaging
+*.whl
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+.pytype/
+.pyre/
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs & temp files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+
+# Rerun / visualization artifacts
+.rerun/
+*.rrd
+
+# Evaluation outputs
+results/
+outputs/
+
+# Local policy hook (copy from exploration_challenge/policies/random_walk.py)
+submission.py
