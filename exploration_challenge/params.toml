@@ -1,0 +1,34 @@
+# Evaluation defaults for run_eval.py — CLI flags override these values.
+
+[eval]
+# Fraction of nodes that must be OBSERVED to finish exploration.
+explore_threshold = 0.9
+# Fraction of all nodes that must be RE-OBSERVED during surveillance.
+surveil_threshold = 0.9
+# Default graph JSONs (relative to graphs/train/); unset = all *.json there.
+graphs = [
+    "basic.json",
+    "obstacles.json",
+    "sparse.json",
+    "double_room.json",
+    "warehouse.json",
+    "large.json"
+]
+# Graph hops visible from each drone.
+k = 4
+# Max per-hop turn angle (degrees) for line-of-sight; 180 disables the gate.
+max_turn_deg = 75.0
+# Per-scan miss probability per candidate node (0 = perfect); drops block see-through.
+drop_prob = 0.0
+# Official challenge: 3 UAVs; lockstep ticks and makespan scoring (lowest wins).
+n_agents = 3
+# Policy .py path or dotted module with `Explorer`; CLI --submission overrides.
+submission = "exploration_challenge/policies/random_walk.py"
+# Fixed start node for agent 0; unset = random distinct starts per seed.
+# start = 0
+# Seeds per graph (results averaged).
+seeds = 1
+# Max policy decisions per episode.
+max_steps = 1000
+# Pause between moves in seconds (>0 for live demos).
+step_delay = 0.0
