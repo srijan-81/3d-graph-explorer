@@ -74,10 +74,14 @@ class Explorer:
     SENSOR_K: int = 4
 
     # Weights for _score_explore — tuned by optimize_weights.py
-    W_EDGE_RATIO: float = 48.78
-    W_ISOLATION: float = 26.11
-    W_MAX_EDGE: float = 38.21
-    W_DIST: float = 11.35
+    W_EDGE_RATIO: float = 42.28
+    W_ISOLATION: float = 22.67
+    W_MAX_EDGE: float = 123.67
+    W_DIST: float = 5.01
+
+    # Weights for _surveil_actions — tuned by optimize_weights.py
+    W_SURV_COV: float = 1.0
+    W_SURV_DIST: float = 1.0
 
     def reset(
         self,
@@ -121,18 +125,23 @@ class Explorer:
             for obs in observations:
                 self.surveilled.update(bfs_within_k(self.graph, obs.position, self.SENSOR_K))
 
-        # Stall guard: only counts ticks where agent has no path and no movement
+        # Stall guard: counts ticks where agent has no movement (with or without path)
         for i in range(self.n_agents):
             moved = self.current[i] != self._last_pos[i]
             has_path = bool(self.paths[i])
-            if not moved and not has_path:
+            if not moved:
                 self._stall_count[i] += 1
             else:
                 self._stall_count[i] = 0
             self._last_pos[i] = self.current[i]
 
-            if self._stall_count[i] >= 3:
-                self._force_unstick(i)
+            # Short threshold for truly stuck (no path); longer for collision-blocked
+            threshold = 3 if not has_path else 5
+            if self._stall_count[i] >= threshold:
+                self.paths[i] = []
+                self.targets[i] = None
+                if not has_path:
+                    self._force_unstick(i, phase)
                 self._stall_count[i] = 0
 
         if phase == "explore":
@@ -148,23 +157,29 @@ class Explorer:
 
         return actions
 
-    def _force_unstick(self, i: int) -> None:
-        """Pick the neighbour that is furthest (in 3D) from all other agents."""
+    def _force_unstick(self, i: int, phase: str = "explore") -> None:
         pos = self.current[i]
         nbrs = [n for n in self.graph.get(pos, {}) if n != pos]
         if not nbrs:
             return
-        others_xyz = [self.pos.get(self.current[j], (0.0, 0.0, 0.0))
-                      for j in range(self.n_agents) if j != i]
-        def spread(n: int) -> float:
-            nx, ny, nz = self.pos.get(n, (0.0, 0.0, 0.0))
-            if not others_xyz:
-                return 0.0
-            return min(
-                (nx - ox)**2 + (ny - oy)**2 + (nz - oz)**2
-                for ox, oy, oz in others_xyz
-            )
-        best = max(nbrs, key=spread)
+        if phase == "surveil":
+            # Head toward the neighbor with the most unsurveilled nodes in sensor range
+            best = max(nbrs, key=lambda n: len(
+                bfs_within_k(self.graph, n, self.SENSOR_K) - self.surveilled
+            ))
+        else:
+            # Head toward the neighbor furthest from all other agents
+            others_xyz = [self.pos.get(self.current[j], (0.0, 0.0, 0.0))
+                          for j in range(self.n_agents) if j != i]
+            def spread(n: int) -> float:
+                nx, ny, nz = self.pos.get(n, (0.0, 0.0, 0.0))
+                if not others_xyz:
+                    return 0.0
+                return min(
+                    (nx - ox)**2 + (ny - oy)**2 + (nz - oz)**2
+                    for ox, oy, oz in others_xyz
+                )
+            best = max(nbrs, key=spread)
         self.paths[i] = [best]
         self.targets[i] = best
 
@@ -202,94 +217,6 @@ class Explorer:
     # Explore actions
     # ------------------------------------------------------------------
 
-    def _explore(self, positions: List[int]) -> List[int]:
-        # Reset any paths if we've arrived at the target
-        for i, pos in enumerate(positions):
-            if self.targets[i] == pos:
-                self.paths[i] = []
-                self.targets[i] = None
-
-        # Build local dist maps for all agents
-        dist_maps: List[Dict[int, float]] = []
-        for i in range(self.n_agents):
-            d, _ = dijkstra(self.graph, positions[i])
-            dist_maps.append(d)
-
-        # If a UAV has no target, find a good one
-        claimed_targets: Set[int] = set()
-        for i in range(self.n_agents):
-            if self.targets[i] is not None:
-                claimed_targets.add(self.targets[i])
-
-        # Assign targets
-        for i in range(self.n_agents):
-            if self.targets[i] is not None:
-                continue
-
-            best_score = -1.0
-            best_node = None
-
-            # Consider all known nodes as potential targets
-            potential_target_nodes = set(self.graph.keys())
-
-            # Filter potential targets to only those reachable and not claimed
-            reachable_unclaimed_targets = [
-                node for node in potential_target_nodes
-                if dist_maps[i].get(node, float("inf")) < float("inf") and node not in claimed_targets
-            ]
-
-            for node in reachable_unclaimed_targets:
-                d = dist_maps[i][node]
-
-                # Calculate potential gain in observed nodes if agent moves to 'node'
-                nodes_visible_from_target = bfs_within_k(self.graph, node, self.SENSOR_K)
-                newly_observed_count = len(nodes_visible_from_target - self.observed)
-
-                # Score based on new observed nodes revealed and distance
-                # Add a small constant to distance to avoid division by zero and smooth scores for very close nodes
-                score = float(newly_observed_count) / (d + 1.0)
-                
-                # Give a significant bonus to nodes that are not yet physically visited,
-                # as physically visiting them confirms their existence and makes them
-                # potential starting points for new exploration/surveillance.
-                if node not in self.physically_visited:
-                    score *= 10.0 # Arbitrary bonus to prioritize physically visiting new nodes
-
-                if score > best_score:
-                    best_score = score
-                    best_node = node
-            
-            if best_node is None:
-                # Fallback: if no high-scoring new targets, try to sweep any observed but not physically visited nodes
-                # This can happen if all frontiers are claimed or no new info can be gained.
-                # Prioritize nodes that are part of the known graph but not yet 'physically_visited'.
-                observed_but_not_physically_visited = self.observed - self.physically_visited
-                reachable_fallback_targets = [
-                    n for n in observed_but_not_physically_visited
-                    if dist_maps[i].get(n, float("inf")) < float("inf")
-                    and n not in claimed_targets
-                ]
-                if reachable_fallback_targets:
-                    best_node = min(reachable_fallback_targets, key=lambda n: dist_maps[i][n])
-                else:
-                    # Last resort: if nothing else, just stay put (or a random move if allowed)
-                    # For now, let's make them stay put if no target is found.
-                    best_node = positions[i] # Stay at current position
-
-            self.targets[i] = best_node
-            if best_node is not None and best_node != positions[i]: # Only claim if moving to a new target
-                claimed_targets.add(best_node)
-                _, prev = dijkstra(self.graph, positions[i], {best_node})
-                self.paths[i] = reconstruct_path(prev, best_node)
-                if self.paths[i] and self.paths[i][0] == positions[i]:
-                    self.paths[i].pop(0)
-                
-                # If target is current position, path should be empty
-                if best_node == positions[i]:
-                    self.paths[i] = []
-
-
-        return self._follow_paths(positions)
     def _explore_actions(self) -> List[int]:
         positions = list(self.current)
 
@@ -324,24 +251,26 @@ class Explorer:
                 continue
 
             candidates = frontiers - claimed
+            convoy = False
             if not candidates:
-                # Fallback: any physically-unvisited reachable node
+                # All frontiers claimed — convoy toward best existing frontier
+                # so idle agents are nearby when it opens new territory
                 candidates = {
-                    n for n in self.graph
-                    if n not in self.physically_visited
-                    and dist_maps[i].get(n, float("inf")) < float("inf")
-                    and n not in claimed
+                    n for n in frontiers
+                    if dist_maps[i].get(n, float("inf")) < float("inf")
                 }
+                convoy = True
             if not candidates:
                 self.targets[i] = None
                 self.paths[i] = []
                 continue
 
             best = max(candidates, key=lambda n: self._score_explore(
-                n, positions, dist_maps, claimed, i))
+                n, positions, dist_maps, set() if convoy else claimed, i))
 
             self.targets[i] = best
-            claimed.add(best)
+            if not convoy:
+                claimed.add(best)
             _, prev = dijkstra(self.graph, positions[i], {best})
             self.paths[i] = reconstruct_path(prev, best)
             if self.paths[i] and self.paths[i][0] == positions[i]:
@@ -396,7 +325,6 @@ class Explorer:
 
     def _surveil_actions(self) -> List[int]:
         positions = list(self.current)
-        all_nodes = list(self.graph.keys())
 
         # Apply sensor at rest
         for pos in positions:
@@ -429,7 +357,7 @@ class Explorer:
             if self.targets[i] is not None:
                 continue
 
-            best_score = -1.0
+            best_score = -float("inf")
             best_node = None
             for node in survey_frontier:
                 if node in claimed:
@@ -440,12 +368,13 @@ class Explorer:
                 d = dist_maps[i].get(node, float("inf"))
                 if d == float("inf"):
                     continue
-                score = cov / (d + 1.0)
+                score = (cov * self.W_SURV_COV) / (d * self.W_SURV_DIST + 1.0)
                 if score > best_score:
                     best_score = score
                     best_node = node
 
             if best_node is None:
+                # Fallback: closest unclaimed survey frontier with any coverage
                 reachable = [
                     n for n in survey_frontier
                     if dist_maps[i].get(n, float("inf")) < float("inf")
