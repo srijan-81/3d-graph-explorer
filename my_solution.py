@@ -74,10 +74,10 @@ class Explorer:
     SENSOR_K: int = 4
 
     # Weights for _score_explore — tuned by optimize_weights.py
-    W_EDGE_RATIO: float = 50.0
-    W_ISOLATION: float = 10.0
-    W_MAX_EDGE: float = 100.0
-    W_DIST: float = 3.0
+    W_EDGE_RATIO: float = 48.78
+    W_ISOLATION: float = 26.11
+    W_MAX_EDGE: float = 38.21
+    W_DIST: float = 11.35
 
     def reset(
         self,
@@ -364,7 +364,7 @@ class Explorer:
         if my_dist == float("inf"):
             return -float("inf")
 
-        reachable = bfs_within_k(self.graph, node, self.SENSOR_K)
+        reachable = bfs_within_k(self.graph, node, 1)
         visited_nbrs = sum(1 for v in reachable if v in self.physically_visited)
         unvisited_nbrs = sum(1 for v in reachable if v not in self.physically_visited)
 
