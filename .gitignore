@@ -74,3 +74,7 @@ outputs/
 
 # Local policy hook (copy from exploration_challenge/policies/random_walk.py)
 submission.py
+
+# AI
+.claude
+CLAUDE.md
