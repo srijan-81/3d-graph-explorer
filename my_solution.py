@@ -73,6 +73,12 @@ def bfs_within_k(
 class Explorer:
     SENSOR_K: int = 4
 
+    # Weights for _score_explore — tuned by optimize_weights.py
+    W_EDGE_RATIO: float = 50.0
+    W_ISOLATION: float = 10.0
+    W_MAX_EDGE: float = 100.0
+    W_DIST: float = 3.0
+
     def reset(
         self,
         starts: List[int],
@@ -358,9 +364,9 @@ class Explorer:
         if my_dist == float("inf"):
             return -float("inf")
 
-        nbrs = self.graph.get(node, {})
-        visited_nbrs = sum(1 for v in nbrs if v in self.physically_visited)
-        unvisited_nbrs = sum(1 for v in nbrs if v not in self.physically_visited)
+        reachable = bfs_within_k(self.graph, node, self.SENSOR_K)
+        visited_nbrs = sum(1 for v in reachable if v in self.physically_visited)
+        unvisited_nbrs = sum(1 for v in reachable if v not in self.physically_visited)
 
         # Edge-ratio: high when mostly unvisited neighbors = true exploration boundary.
         # Interior nodes (surrounded by visited nodes) score low; edge nodes score high.
@@ -375,13 +381,13 @@ class Explorer:
         isolation = min(min_other_dist, 100.0)
 
         # Max edge cost: long edges signal a passage or corridor to undiscovered regions
-        max_edge = max(nbrs.values(), default=0.0)
+        max_edge = max(self.graph.get(node, {}).values(), default=0.0)
 
         return (
-            edge_ratio * 30.0
-            + isolation * 2.0
-            + max_edge * 15.0
-            - math.log(my_dist + 1.0) * 3.0
+            edge_ratio * self.W_EDGE_RATIO
+            + isolation * self.W_ISOLATION
+            + max_edge * self.W_MAX_EDGE
+            - math.log(my_dist + 1.0) * self.W_DIST
         )
 
     # ------------------------------------------------------------------
