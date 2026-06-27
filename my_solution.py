@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import math
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -114,7 +115,7 @@ class Explorer:
             for obs in observations:
                 self.surveilled.update(bfs_within_k(self.graph, obs.position, self.SENSOR_K))
 
-        # Stall guard
+        # Stall guard: only counts ticks where agent has no path and no movement
         for i in range(self.n_agents):
             moved = self.current[i] != self._last_pos[i]
             has_path = bool(self.paths[i])
@@ -182,10 +183,7 @@ class Explorer:
     # ------------------------------------------------------------------
 
     def _frontier_nodes(self) -> Set[int]:
-        """
-        Known nodes that border at least one node we haven't physically
-        stood on yet. This is the true exploration boundary.
-        """
+        """Known nodes adjacent to at least one physically-unvisited node."""
         frontiers: Set[int] = set()
         for u in self.graph:
             for v in self.graph[u]:
@@ -302,7 +300,6 @@ class Explorer:
                 t is not None
                 and t != positions[i]
                 and t in self.graph
-                and t in frontiers
                 and dist_maps[i].get(t, float("inf")) < float("inf")
             )
             if still_valid:
@@ -322,7 +319,7 @@ class Explorer:
 
             candidates = frontiers - claimed
             if not candidates:
-                # Fallback: any unvisited node reachable from here
+                # Fallback: any physically-unvisited reachable node
                 candidates = {
                     n for n in self.graph
                     if n not in self.physically_visited
@@ -361,26 +358,30 @@ class Explorer:
         if my_dist == float("inf"):
             return -float("inf")
 
-        # Unvisited neighbours reachable from this frontier
-        unvisited_nbrs = sum(
-            1 for v in self.graph.get(node, {})
-            if v not in self.physically_visited
-        )
+        nbrs = self.graph.get(node, {})
+        visited_nbrs = sum(1 for v in nbrs if v in self.physically_visited)
+        unvisited_nbrs = sum(1 for v in nbrs if v not in self.physically_visited)
 
-        # Dispersion: prefer nodes far from OTHER agents' current positions
-        # Use precomputed dist maps from other agents
+        # Edge-ratio: high when mostly unvisited neighbors = true exploration boundary.
+        # Interior nodes (surrounded by visited nodes) score low; edge nodes score high.
+        edge_ratio = unvisited_nbrs / (visited_nbrs + 1.0)
+
+        # Isolation from other agents: far = unexplored territory for multi-agent spreading
         min_other_dist = min(
             (dist_maps[j].get(node, float("inf"))
              for j in range(self.n_agents) if j != agent_idx),
             default=0.0
         )
-        # We want min_other_dist to be large (far from others)
-        spread_score = min(min_other_dist, 50.0)  # cap to avoid outlier dominance
+        isolation = min(min_other_dist, 100.0)
+
+        # Max edge cost: long edges signal a passage or corridor to undiscovered regions
+        max_edge = max(nbrs.values(), default=0.0)
 
         return (
-            unvisited_nbrs * 10.0
-            + spread_score * 0.5
-            - my_dist * 1.0
+            edge_ratio * 30.0
+            + isolation * 2.0
+            + max_edge * 15.0
+            - math.log(my_dist + 1.0) * 3.0
         )
 
     # ------------------------------------------------------------------
@@ -395,10 +396,14 @@ class Explorer:
         for pos in positions:
             self.surveilled.update(bfs_within_k(self.graph, pos, self.SENSOR_K))
 
-        # Precompute coverage value for every node once per tick
-        # (avoids O(n²) repeated BFS calls)
+        # Only precompute coverage for nodes adjacent to unsurveilled area
+        survey_frontier = {
+            u for u in self.graph
+            for v in self.graph[u]
+            if v not in self.surveilled
+        }
         cov_cache: Dict[int, int] = {}
-        for node in all_nodes:
+        for node in survey_frontier:
             reachable = bfs_within_k(self.graph, node, self.SENSOR_K)
             cov_cache[node] = len(reachable - self.surveilled)
 
@@ -420,7 +425,7 @@ class Explorer:
 
             best_score = -1.0
             best_node = None
-            for node in all_nodes:
+            for node in survey_frontier:
                 if node in claimed:
                     continue
                 cov = cov_cache.get(node, 0)
@@ -435,9 +440,8 @@ class Explorer:
                     best_node = node
 
             if best_node is None:
-                # Sweep any node with remaining coverage
                 reachable = [
-                    n for n in all_nodes
+                    n for n in survey_frontier
                     if dist_maps[i].get(n, float("inf")) < float("inf")
                     and n not in claimed
                     and cov_cache.get(n, 0) > 0
@@ -490,9 +494,8 @@ class Explorer:
             if nxt == self.current[i]:
                 continue
             if nxt in claimed_nodes:
+                # Vertex conflict: just wait this tick; keep path for next tick
                 resolved[i] = self.current[i]
-                self.paths[i] = []
-                self.targets[i] = None
             else:
                 claimed_nodes.add(nxt)
 
@@ -504,6 +507,7 @@ class Explorer:
                     and resolved[i] != self.current[i]
                     and resolved[j] != self.current[j]
                 ):
+                    # Edge-swap deadlock: lower-priority agent re-plans
                     resolved[j] = self.current[j]
                     self.paths[j] = []
                     self.targets[j] = None
