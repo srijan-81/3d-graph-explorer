@@ -198,6 +198,94 @@ class Explorer:
     # Explore actions
     # ------------------------------------------------------------------
 
+    def _explore(self, positions: List[int]) -> List[int]:
+        # Reset any paths if we've arrived at the target
+        for i, pos in enumerate(positions):
+            if self.targets[i] == pos:
+                self.paths[i] = []
+                self.targets[i] = None
+
+        # Build local dist maps for all agents
+        dist_maps: List[Dict[int, float]] = []
+        for i in range(self.n_agents):
+            d, _ = dijkstra(self.graph, positions[i])
+            dist_maps.append(d)
+
+        # If a UAV has no target, find a good one
+        claimed_targets: Set[int] = set()
+        for i in range(self.n_agents):
+            if self.targets[i] is not None:
+                claimed_targets.add(self.targets[i])
+
+        # Assign targets
+        for i in range(self.n_agents):
+            if self.targets[i] is not None:
+                continue
+
+            best_score = -1.0
+            best_node = None
+
+            # Consider all known nodes as potential targets
+            potential_target_nodes = set(self.graph.keys())
+
+            # Filter potential targets to only those reachable and not claimed
+            reachable_unclaimed_targets = [
+                node for node in potential_target_nodes
+                if dist_maps[i].get(node, float("inf")) < float("inf") and node not in claimed_targets
+            ]
+
+            for node in reachable_unclaimed_targets:
+                d = dist_maps[i][node]
+
+                # Calculate potential gain in observed nodes if agent moves to 'node'
+                nodes_visible_from_target = bfs_within_k(self.graph, node, self.SENSOR_K)
+                newly_observed_count = len(nodes_visible_from_target - self.observed)
+
+                # Score based on new observed nodes revealed and distance
+                # Add a small constant to distance to avoid division by zero and smooth scores for very close nodes
+                score = float(newly_observed_count) / (d + 1.0)
+                
+                # Give a significant bonus to nodes that are not yet physically visited,
+                # as physically visiting them confirms their existence and makes them
+                # potential starting points for new exploration/surveillance.
+                if node not in self.physically_visited:
+                    score *= 10.0 # Arbitrary bonus to prioritize physically visiting new nodes
+
+                if score > best_score:
+                    best_score = score
+                    best_node = node
+            
+            if best_node is None:
+                # Fallback: if no high-scoring new targets, try to sweep any observed but not physically visited nodes
+                # This can happen if all frontiers are claimed or no new info can be gained.
+                # Prioritize nodes that are part of the known graph but not yet 'physically_visited'.
+                observed_but_not_physically_visited = self.observed - self.physically_visited
+                reachable_fallback_targets = [
+                    n for n in observed_but_not_physically_visited
+                    if dist_maps[i].get(n, float("inf")) < float("inf")
+                    and n not in claimed_targets
+                ]
+                if reachable_fallback_targets:
+                    best_node = min(reachable_fallback_targets, key=lambda n: dist_maps[i][n])
+                else:
+                    # Last resort: if nothing else, just stay put (or a random move if allowed)
+                    # For now, let's make them stay put if no target is found.
+                    best_node = positions[i] # Stay at current position
+
+            self.targets[i] = best_node
+            if best_node is not None and best_node != positions[i]: # Only claim if moving to a new target
+                claimed_targets.add(best_node)
+                _, prev = dijkstra(self.graph, positions[i], {best_node})
+                self.paths[i] = reconstruct_path(prev, best_node)
+                if self.paths[i] and self.paths[i][0] == positions[i]:
+                    self.paths[i].pop(0)
+                
+                # If target is current position, path should be empty
+                if best_node == positions[i]:
+                    self.paths[i] = []
+
+
+        return self._follow_paths(positions)
     def _explore_actions(self) -> List[int]:
         positions = list(self.current)
 
