@@ -18,7 +18,7 @@ from exploration_challenge.evaluator import run_suite
 from exploration_challenge.graph_io import load_graph
 import my_solution
 
-GRAPHS_DIR = Path("graphs_test")
+GRAPHS_DIR = Path("graphs/train")
 N_AGENTS = 3
 EVAL_SEEDS = [0]
 
@@ -45,7 +45,7 @@ def evaluate(weights: dict) -> float:
             seeds=EVAL_SEEDS,
             n_agents=N_AGENTS,
             live=False,
-            max_steps=100,
+            max_steps=1000,
         )
         total += result["total_score"]
     return total

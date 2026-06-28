@@ -84,16 +84,16 @@ def bfs_within_k(
 class Explorer:
     SENSOR_K: int = 4
 
-    W_EDGE_RATIO: float = 42.28
-    W_ISOLATION: float = 22.67
-    W_MAX_EDGE: float = 123.67
-    W_DIST: float = 70.0
+    W_EDGE_RATIO: float = 47.31
+    W_ISOLATION: float = 18.19
+    W_MAX_EDGE: float = 142.55
+    W_DIST: float = 71.40
 
-    W_SURV_COV: float = 6.29
-    W_SURV_DIST: float = 1.72
+    W_SURV_COV: float = 14.83
+    W_SURV_DIST: float = 0.51
 
     # Territory preference multipliers (soft Voronoi)
-    TERR_EXPLORE: float = 1.2   # Score multiplier for frontiers in own Voronoi region
+    TERR_EXPLORE: float = 1.42   # Score multiplier for frontiers in own Voronoi region
     TERR_SURVEIL: float = 8.0   # Score multiplier for survey nodes in own Voronoi region
 
     def reset(
