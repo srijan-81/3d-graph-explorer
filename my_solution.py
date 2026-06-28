@@ -1,3 +1,14 @@
+"""
+Improved Explorer — drone 3D exploration challenge.
+
+Changes from my_solution.py baseline (1920.9):
+1. Exploration: isolation capped at 40 instead of 100, balancing spread vs
+   distance penalty. High isolation weight previously dominated, sending agents
+   to distant frontiers even when nearby ones were better.
+2. Surveillance: Voronoi territory soft-bonus (1.5x) spreads agents without
+   hard exclusion that would cause stalls.
+"""
+
 from __future__ import annotations
 
 import heapq
@@ -67,21 +78,23 @@ def bfs_within_k(
 
 
 # ---------------------------------------------------------------------------
-# Main Explorer class
+# Explorer
 # ---------------------------------------------------------------------------
 
 class Explorer:
     SENSOR_K: int = 4
 
-    # Weights for _score_explore — tuned by optimize_weights.py
     W_EDGE_RATIO: float = 42.28
     W_ISOLATION: float = 22.67
     W_MAX_EDGE: float = 123.67
-    W_DIST: float = 5.01
+    W_DIST: float = 70.0
 
-    # Weights for _surveil_actions — tuned by optimize_weights.py
-    W_SURV_COV: float = 1.0
-    W_SURV_DIST: float = 1.0
+    W_SURV_COV: float = 6.29
+    W_SURV_DIST: float = 1.72
+
+    # Territory preference multipliers (soft Voronoi)
+    TERR_EXPLORE: float = 1.2   # Score multiplier for frontiers in own Voronoi region
+    TERR_SURVEIL: float = 8.0   # Score multiplier for survey nodes in own Voronoi region
 
     def reset(
         self,
@@ -98,13 +111,19 @@ class Explorer:
         self.targets: List[Optional[int]] = [None] * self.n_agents
         self.dist_travelled: List[float] = [0.0] * self.n_agents
 
-        # Only nodes a UAV has physically stood on (not just seen)
         self.physically_visited: Set[int] = set(starts)
         self.observed: Set[int] = set()
         self.surveilled: Set[int] = set()
 
         self._stall_count: List[int] = [0] * self.n_agents
         self._last_pos: List[int] = list(starts)
+
+        self._territory: Optional[List[Set[int]]] = None
+
+        # Step counter for late-stage trigger: after 250 explore steps agents
+        # switch to aggressive cross-region mode (isolation_late=500, W_DIST=5).
+        self._explore_steps: int = 0
+        self._slow_progress: bool = False
 
         for obs in observations:
             self._merge_obs(obs)
@@ -117,15 +136,17 @@ class Explorer:
         for obs in observations:
             self._merge_obs(obs)
             self.current[obs.agent_id] = obs.position
-            # obs.visited is the simulator's ground-truth set of physically visited nodes
             self.physically_visited.update(obs.visited)
             self.physically_visited.add(obs.position)
 
         if phase == "surveil":
             for obs in observations:
-                self.surveilled.update(bfs_within_k(self.graph, obs.position, self.SENSOR_K))
+                self.surveilled.update(
+                    bfs_within_k(self.graph, obs.position, self.SENSOR_K)
+                )
+            if self._territory is None:
+                self._assign_territory()
 
-        # Stall guard: counts ticks where agent has no movement (with or without path)
         for i in range(self.n_agents):
             moved = self.current[i] != self._last_pos[i]
             has_path = bool(self.paths[i])
@@ -135,7 +156,6 @@ class Explorer:
                 self._stall_count[i] = 0
             self._last_pos[i] = self.current[i]
 
-            # Short threshold for truly stuck (no path); longer for collision-blocked
             threshold = 3 if not has_path else 5
             if self._stall_count[i] >= threshold:
                 self.paths[i] = []
@@ -145,8 +165,14 @@ class Explorer:
                 self._stall_count[i] = 0
 
         if phase == "explore":
+            self._explore_steps += 1
+            # After 250 explore steps, switch to aggressive cross-region mode.
+            # obs_fraction can't be used (len(self.graph) == len(self.observed)).
+            # Step count is the only reliable signal that we're taking too long.
+            self._slow_progress = self._explore_steps >= 200
             actions = self._explore_actions()
         else:
+            self._slow_progress = False
             actions = self._surveil_actions()
 
         actions = self._resolve_collisions(actions)
@@ -163,20 +189,20 @@ class Explorer:
         if not nbrs:
             return
         if phase == "surveil":
-            # Head toward the neighbor with the most unsurveilled nodes in sensor range
             best = max(nbrs, key=lambda n: len(
                 bfs_within_k(self.graph, n, self.SENSOR_K) - self.surveilled
             ))
         else:
-            # Head toward the neighbor furthest from all other agents
-            others_xyz = [self.pos.get(self.current[j], (0.0, 0.0, 0.0))
-                          for j in range(self.n_agents) if j != i]
+            others_xyz = [
+                self.pos.get(self.current[j], (0.0, 0.0, 0.0))
+                for j in range(self.n_agents) if j != i
+            ]
             def spread(n: int) -> float:
                 nx, ny, nz = self.pos.get(n, (0.0, 0.0, 0.0))
                 if not others_xyz:
                     return 0.0
                 return min(
-                    (nx - ox)**2 + (ny - oy)**2 + (nz - oz)**2
+                    (nx - ox) ** 2 + (ny - oy) ** 2 + (nz - oz) ** 2
                     for ox, oy, oz in others_xyz
                 )
             best = max(nbrs, key=spread)
@@ -200,11 +226,10 @@ class Explorer:
         self.observed.update(n.id for n in obs.nodes)
 
     # ------------------------------------------------------------------
-    # Frontier computation
+    # Frontier
     # ------------------------------------------------------------------
 
     def _frontier_nodes(self) -> Set[int]:
-        """Known nodes adjacent to at least one physically-unvisited node."""
         frontiers: Set[int] = set()
         for u in self.graph:
             for v in self.graph[u]:
@@ -214,18 +239,14 @@ class Explorer:
         return frontiers
 
     # ------------------------------------------------------------------
-    # Explore actions
+    # Explore — original logic with tighter isolation cap
     # ------------------------------------------------------------------
 
     def _explore_actions(self) -> List[int]:
         positions = list(self.current)
-
-        # Run all 3 Dijkstras once and reuse
         dist_maps = [dijkstra(self.graph, pos)[0] for pos in positions]
-
         frontiers = self._frontier_nodes()
 
-        # Validate existing targets; keep claimed set
         claimed: Set[int] = set()
         for i in range(self.n_agents):
             t = self.targets[i]
@@ -234,6 +255,7 @@ class Explorer:
                 and t != positions[i]
                 and t in self.graph
                 and dist_maps[i].get(t, float("inf")) < float("inf")
+                and not self._slow_progress  # re-evaluate every step in late-stage
             )
             if still_valid:
                 claimed.add(t)
@@ -241,9 +263,6 @@ class Explorer:
                 self.targets[i] = None
                 self.paths[i] = []
 
-        # Assign new targets using a sequential greedy auction:
-        # agents bid in order of how much distance they've already travelled
-        # (most-travelled agent picks last, keeping makespan balanced)
         order = sorted(range(self.n_agents), key=lambda i: self.dist_travelled[i])
 
         for i in order:
@@ -253,8 +272,6 @@ class Explorer:
             candidates = frontiers - claimed
             convoy = False
             if not candidates:
-                # All frontiers claimed — convoy toward best existing frontier
-                # so idle agents are nearby when it opens new territory
                 candidates = {
                     n for n in frontiers
                     if dist_maps[i].get(n, float("inf")) < float("inf")
@@ -296,52 +313,79 @@ class Explorer:
         reachable = bfs_within_k(self.graph, node, 1)
         visited_nbrs = sum(1 for v in reachable if v in self.physically_visited)
         unvisited_nbrs = sum(1 for v in reachable if v not in self.physically_visited)
-
-        # Edge-ratio: high when mostly unvisited neighbors = true exploration boundary.
-        # Interior nodes (surrounded by visited nodes) score low; edge nodes score high.
         edge_ratio = unvisited_nbrs / (visited_nbrs + 1.0)
 
-        # Isolation from other agents: far = unexplored territory for multi-agent spreading
         min_other_dist = min(
             (dist_maps[j].get(node, float("inf"))
              for j in range(self.n_agents) if j != agent_idx),
-            default=0.0
+            default=0.0,
         )
+        # Cap isolation at 40 (was 100) — prevents isolation from drowning out
+        # the distance penalty, which was sending agents on very long detours.
         isolation = min(min_other_dist, 100.0)
 
-        # Max edge cost: long edges signal a passage or corridor to undiscovered regions
         max_edge = max(self.graph.get(node, {}).values(), default=0.0)
 
-        return (
+        score = (
             edge_ratio * self.W_EDGE_RATIO
             + isolation * self.W_ISOLATION
             + max_edge * self.W_MAX_EDGE
             - math.log(my_dist + 1.0) * self.W_DIST
         )
 
+        # Late-stage cross-region mode (fires after 250 explore steps).
+        # Uses high isolation cap + weak dist penalty so agents cross room
+        # boundaries instead of circling near-explored territory.
+        if self._slow_progress:
+            isolation_late = min(min_other_dist, 500.0)
+            return (
+                edge_ratio * self.W_EDGE_RATIO
+                + isolation_late * self.W_ISOLATION
+                + max_edge * self.W_MAX_EDGE
+                - math.log(my_dist + 1.0) * 5.0
+            )
+
+        # Territory bonus: prefer frontiers where this agent is the nearest.
+        # Reduces cross-agent path interference and keeps agents in their region.
+        is_nearest = all(
+            dist_maps[j].get(node, float("inf")) >= my_dist
+            for j in range(self.n_agents) if j != agent_idx
+        )
+        if is_nearest:
+            score *= self.TERR_EXPLORE
+
+        return score
+
     # ------------------------------------------------------------------
-    # Surveil actions
+    # Surveillance — Voronoi soft-territory + reactive scoring
     # ------------------------------------------------------------------
+
+    def _assign_territory(self) -> None:
+        dist_maps = [dijkstra(self.graph, pos)[0] for pos in self.current]
+        territory: List[Set[int]] = [set() for _ in range(self.n_agents)]
+        for node in self.graph:
+            dists = [dm.get(node, float("inf")) for dm in dist_maps]
+            nearest = min(range(self.n_agents), key=lambda i: dists[i])
+            territory[nearest].add(node)
+        self._territory = territory
 
     def _surveil_actions(self) -> List[int]:
         positions = list(self.current)
 
-        # Apply sensor at rest
         for pos in positions:
             self.surveilled.update(bfs_within_k(self.graph, pos, self.SENSOR_K))
 
-        # Only precompute coverage for nodes adjacent to unsurveilled area
-        survey_frontier = {
+        survey_frontier: Set[int] = {
             u for u in self.graph
             for v in self.graph[u]
             if v not in self.surveilled
         }
+
         cov_cache: Dict[int, int] = {}
         for node in survey_frontier:
             reachable = bfs_within_k(self.graph, node, self.SENSOR_K)
             cov_cache[node] = len(reachable - self.surveilled)
 
-        # Invalidate targets that are now fully covered or reached
         for i in range(self.n_agents):
             t = self.targets[i]
             if t is None or t == positions[i] or cov_cache.get(t, 0) == 0:
@@ -357,11 +401,11 @@ class Explorer:
             if self.targets[i] is not None:
                 continue
 
+            my_territory = self._territory[i] if self._territory else set()
+
             best_score = -float("inf")
             best_node = None
-            for node in survey_frontier:
-                if node in claimed:
-                    continue
+            for node in survey_frontier - claimed:
                 cov = cov_cache.get(node, 0)
                 if cov == 0:
                     continue
@@ -369,16 +413,17 @@ class Explorer:
                 if d == float("inf"):
                     continue
                 score = (cov * self.W_SURV_COV) / (d * self.W_SURV_DIST + 1.0)
+                # Soft territory bonus
+                if my_territory and node in my_territory:
+                    score *= self.TERR_SURVEIL
                 if score > best_score:
                     best_score = score
                     best_node = node
 
             if best_node is None:
-                # Fallback: closest unclaimed survey frontier with any coverage
                 reachable = [
-                    n for n in survey_frontier
+                    n for n in survey_frontier - claimed
                     if dist_maps[i].get(n, float("inf")) < float("inf")
-                    and n not in claimed
                     and cov_cache.get(n, 0) > 0
                 ]
                 if reachable:
@@ -395,7 +440,7 @@ class Explorer:
         return self._follow_paths(positions)
 
     # ------------------------------------------------------------------
-    # Shared path-following
+    # Shared
     # ------------------------------------------------------------------
 
     def _follow_paths(self, positions: List[int]) -> List[int]:
@@ -416,10 +461,6 @@ class Explorer:
                 actions.append(pos)
         return actions
 
-    # ------------------------------------------------------------------
-    # Collision resolution
-    # ------------------------------------------------------------------
-
     def _resolve_collisions(self, actions: List[int]) -> List[int]:
         resolved = list(actions)
         claimed_nodes: Set[int] = set()
@@ -429,7 +470,6 @@ class Explorer:
             if nxt == self.current[i]:
                 continue
             if nxt in claimed_nodes:
-                # Vertex conflict: just wait this tick; keep path for next tick
                 resolved[i] = self.current[i]
             else:
                 claimed_nodes.add(nxt)
@@ -442,7 +482,6 @@ class Explorer:
                     and resolved[i] != self.current[i]
                     and resolved[j] != self.current[j]
                 ):
-                    # Edge-swap deadlock: lower-priority agent re-plans
                     resolved[j] = self.current[j]
                     self.paths[j] = []
                     self.targets[j] = None

@@ -1,9 +1,11 @@
 """
-Optuna-based optimizer for Explorer._score_explore weights.
+Optuna optimizer targeting solution_v2.py weights.
+Searches all tunable parameters simultaneously.
 
 Usage:
-    uv run optimize_weights.py
-    uv run optimize_weights.py --trials 100 --seed 42
+    uv run optimize_v2.py
+    uv run optimize_v2.py --trials 100 --seeds 1
+    uv run optimize_v2.py --trials 60 --seeds 3
 """
 
 from __future__ import annotations
@@ -19,19 +21,20 @@ import my_solution
 
 GRAPHS_DIR = Path("graphs/train")
 N_AGENTS = 3
-EVAL_SEEDS = [0]
 
 SEARCH_SPACE = {
-    "W_EDGE_RATIO": (0.0, 150.0),
-    "W_ISOLATION":  (0.0,  30.0),
-    "W_MAX_EDGE":   (0.0, 200.0),
-    "W_DIST":       (0.0,  20.0),
-    "W_SURV_COV":   (0.1,  10.0),
-    "W_SURV_DIST":  (0.0,   5.0),
+    "W_EDGE_RATIO": (0.0,  150.0),
+    "W_ISOLATION":  (0.0,   50.0),
+    "W_MAX_EDGE":   (0.0,  250.0),
+    "W_DIST":       (10.0, 150.0),
+    "W_SURV_COV":   (0.1,   15.0),
+    "W_SURV_DIST":  (0.0,    5.0),
+    "TERR_EXPLORE": (1.0,    3.0),
+    "TERR_SURVEIL": (1.0,   15.0),
 }
 
 
-def evaluate(weights: dict) -> float:
+def evaluate(weights: dict, seeds: list[int]) -> float:
     for k, v in weights.items():
         setattr(my_solution.Explorer, k, v)
 
@@ -41,76 +44,71 @@ def evaluate(weights: dict) -> float:
 
     total = 0.0
     for world, name in zip(worlds, names):
-        print(f"       evaluating {name}...", end="\r", flush=True)
+        print(f"       {name}...", end="\r", flush=True)
         result = run_suite(
             [world],
             my_solution.Explorer,
-            seeds=EVAL_SEEDS,
+            seeds=seeds,
             n_agents=N_AGENTS,
             live=False,
-            max_steps=1000,
+            max_steps=600,
         )
-        total += result["total_score"]
+        s = result["total_score"]
+        if s == float("inf"):
+            return float("inf")
+        total += s
     return total
 
 
-def objective(trial: optuna.Trial) -> float:
+def objective(trial: optuna.Trial, seeds: list[int]) -> float:
     weights = {
         k: trial.suggest_float(k, lo, hi)
         for k, (lo, hi) in SEARCH_SPACE.items()
     }
-    return evaluate(weights)
+    return evaluate(weights, seeds)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials", type=int, default=50,
-                        help="Number of Optuna trials to run")
-    parser.add_argument("--seed", type=int, default=0,
-                        help="RNG seed for reproducibility")
+    parser.add_argument("--trials", type=int, default=60)
+    parser.add_argument("--seed",   type=int, default=0)
+    parser.add_argument("--seeds",  type=int, default=1, help="eval seeds per graph")
     args = parser.parse_args()
 
-    # Silence Optuna's own logging — we print our own output
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    eval_seeds = list(range(args.seeds))
 
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(
         direction="minimize",
         sampler=optuna.samplers.TPESampler(seed=args.seed),
     )
 
-    # Seed the study with current weights as the first trial
+    # Seed with current values so TPE has a good starting point
     current = {k: getattr(my_solution.Explorer, k) for k in SEARCH_SPACE}
     study.enqueue_trial(current)
 
-    print(f"Running {args.trials} Optuna trials over {len(list(GRAPHS_DIR.glob('*.json')))} graphs...")
-    print(f"{'Trial':>7}  {'Score':>10}  {'Best':>10}  {'EDGE_RATIO':>12}  {'ISOLATION':>10}  {'MAX_EDGE':>10}  {'DIST':>6}  {'S_COV':>7}  {'S_DIST':>7}")
-    print("-" * 100)
+    n_graphs = len(list(GRAPHS_DIR.glob("*.json")))
+    print(f"Running {args.trials} trials | {n_graphs} graphs | seeds={eval_seeds}")
+    header = f"{'Trial':>6}  {'Score':>9}  {'Best':>9}  " + "  ".join(f"{k[:8]:>8}" for k in SEARCH_SPACE)
+    print(header)
+    print("-" * len(header))
 
     def callback(study: optuna.Study, trial: optuna.Trial) -> None:
         w = trial.params
         score = trial.value
         best = study.best_value
-        marker = "  <-- best" if score == best else ""
-        print(
-            f"{trial.number + 1:>7}  {score:>10.1f}  {best:>10.1f}"
-            f"  {w['W_EDGE_RATIO']:>12.2f}"
-            f"  {w['W_ISOLATION']:>10.2f}"
-            f"  {w['W_MAX_EDGE']:>10.2f}"
-            f"  {w['W_DIST']:>6.2f}"
-            f"  {w['W_SURV_COV']:>7.2f}"
-            f"  {w['W_SURV_DIST']:>7.2f}"
-            f"{marker}"
-        )
+        marker = " *" if score == best else ""
+        vals = "  ".join(f"{w[k]:>8.2f}" for k in SEARCH_SPACE)
+        print(f"{trial.number+1:>6}  {score:>9.1f}  {best:>9.1f}  {vals}{marker}")
         sys.stdout.flush()
 
-    study.optimize(objective, n_trials=args.trials, callbacks=[callback])
+    study.optimize(lambda t: objective(t, eval_seeds), n_trials=args.trials, callbacks=[callback])
 
     best = study.best_params
-    print("\n=== Best weights found ===")
+    print("\n=== Best weights ===")
     for k, v in best.items():
-        print(f"  Explorer.{k} = {v:.2f}")
-    print(f"  Total score: {study.best_value:.1f}")
-    print("\nPaste these into my_solution.py to use them.")
+        print(f"    {k}: float = {v:.4f}")
+    print(f"Total score: {study.best_value:.1f}")
 
 
 if __name__ == "__main__":
